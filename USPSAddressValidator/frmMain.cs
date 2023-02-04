@@ -19,6 +19,9 @@ using System.Xml.Serialization;
 using System.Text;
 using Microsoft.VisualBasic;
 using System.Xml;
+using System.Web;
+using Microsoft.VisualBasic.ApplicationServices;
+using USPSAddressValidator.Helpers;
 
 namespace USPSAddressValidator
 {
@@ -66,6 +69,7 @@ namespace USPSAddressValidator
         private void frmMain_Load(object sender, EventArgs e)
         {
             AllocConsole();
+            ConsoleHelper.MoveWindowToCenter();
             openFileDialog.FileName = txtFile.Text;
             OpenFile();
         }
@@ -121,12 +125,12 @@ namespace USPSAddressValidator
             foreach (DataRow row in table.Rows)
             {
                 rq = new AddressValidateRequest();
-                rq.Address.Address1 = (string?)row.ItemArray[0] ?? null;
-                rq.Address.Address2 = (string?)row.ItemArray[1] ?? null;
-                rq.Address.City = (string?)row.ItemArray[2] ?? null;
-                rq.Address.State = (string?)row.ItemArray[3] ?? null;
-                rq.Address.Zip5 = (string?)row.ItemArray[4] ?? null;
-                rq.Address.Zip4 = (string?)row.ItemArray[5] ?? null;
+                rq.Address.Address1 = (string?)row.ItemArray[0] ?? "";
+                rq.Address.Address2 = (string?)row.ItemArray[1] ?? "";
+                rq.Address.City = (string?)row.ItemArray[2] ?? "";
+                rq.Address.State = (string?)row.ItemArray[3] ?? "";
+                rq.Address.Zip5 = (string?)row.ItemArray[4] ?? "";
+                rq.Address.Zip4 = (string?)row.ItemArray[5] ?? "";
                 addressRequestList.Add(rq);
             }
         }
@@ -163,7 +167,6 @@ namespace USPSAddressValidator
 
             WriteLine($"{Environment.NewLine}{TimeStamp}{TAB}Starting...");
 
-
             var encoding = Encoding.GetEncoding("ISO-8859-1");
             XmlWriterSettings xmlWriterSettings = new XmlWriterSettings
             {
@@ -175,6 +178,7 @@ namespace USPSAddressValidator
             XmlSerializer xmlSerializer = new XmlSerializer(typeof(AddressValidateRequest));
 
             XmlSerializer xmlDeserializer = new XmlSerializer(typeof(AddressValidateResponse));
+            var userID = "213CVSHE8041";
 
             foreach (var rq in addressRequestList)
             {
@@ -183,25 +187,24 @@ namespace USPSAddressValidator
                 {
                     try
                     {
-                        string encodedXML;
-                        using (var stream = new MemoryStream())
-                        {
-                            using (var xmlWriter = XmlWriter.Create(stream, xmlWriterSettings))
-                            {
-                                //xmlSerializer.Serialize(xmlWriter, obj, ns);
-                                xmlSerializer.Serialize(xmlWriter, rq);
-                            }
-                            encodedXML = encoding.GetString(stream.ToArray());
-                        }
+                        var xml = "";
 
+                        //Generate XML
+                        xml += $@"<AddressValidateRequest USERID=""{userID}"">";
+                        xml += $@"<Revision>1</Revision>";
+                        xml += $@"<Address ID=""0"">";
+                        xml += $@"<Address1>{rq.Address.Address1}</Address1>";
+                        xml += $@"<Address2>{rq.Address.Address2}</Address2>";
+                        xml += $@"<City>{rq.Address.City}</City>";
+                        xml += $@"<State>{rq.Address.State}</State>";
+                        xml += $@"<Zip5>{rq.Address.Zip5}</Zip5>";
+                        xml += $@"<Zip4>{rq.Address.Zip4}</Zip4>";
+                        xml += $@"</Address>";
+                        xml += $@"</AddressValidateRequest>";
 
+                        var encoding = Encoding.GetEncoding("ISO-8859-1");
+                        string encodedXML = HttpUtility.UrlEncode(xml, encoding);
 
-                        // using (StringReader reader = new StringReader(xml))
-                        // {
-                        //    var test = (AddressValidateRequest)serializer.Deserialize(reader);
-                        // }
-
-                       
                         var response = await GetAsync(encodedXML);
                         if (response == null || !response.IsSuccessStatusCode || response.Content == null)
                         {
@@ -222,14 +225,18 @@ namespace USPSAddressValidator
                             rs = (AddressValidateResponse)xmlDeserializer.Deserialize(reader);
                         if (rs == null) return;
 
-                        _log.Success($"{TAB}Address: {rs.Address}", -1);
+                        _log.Success($"{TimeStamp}{TAB}{rq.Address.Address1} {rq.Address.Address2} {rq.Address.City}, {rq.Address.State} {rq.Address.Zip5} {rq.Address.Zip4}");
                         _stats.Success();
 
                         if (pingRate > 0)
                         {
                             Interlocked.Increment(ref requests);
                             if (requests % pingRate == 0)
-                                WriteLine($"{TimeStamp}{TAB}{requests} requests completed in {TimeSpan.FromMilliseconds(watch.ElapsedMilliseconds):hh\\:mm\\:ss}");
+                            {
+                                elapsed = TimeSpan.FromMilliseconds(watch.ElapsedMilliseconds);
+                                WriteLine($"{TimeStamp}{TAB}{requests} requests completed in {elapsed:hh\\:mm\\:ss}");
+                            }
+
                         }
 
                         // let's wait here for X to honor the API's rate limit                         
@@ -237,7 +244,7 @@ namespace USPSAddressValidator
                     }
                     catch (Exception ex)
                     {
-                        _log.Error(ex.Message, -1);
+                        _log.Error(ex.Message);
                         _stats.Exception();
                     }
                     finally
@@ -251,11 +258,11 @@ namespace USPSAddressValidator
             // await for all the tasks to complete
             await Task.WhenAll(tasks.ToArray());
 
+            elapsed = TimeSpan.FromMilliseconds(watch.ElapsedMilliseconds);
             WriteLine($"{Environment.NewLine}{TimeStamp}{TAB}Done.");
 
             //Finalize
             watch.Stop();
-            elapsed = TimeSpan.FromMilliseconds(watch.ElapsedMilliseconds);
             PrintResults();
         }
 
@@ -266,28 +273,20 @@ namespace USPSAddressValidator
 
         private void PrintResults()
         {
-            var successLog = _log.Items.OrderBy(x => x.ID).Where(x => x.Type == LogItemType.Success).Select(x => x.Message).ToList();
-            var errorLog = _log.Items.OrderBy(x => x.ID).Where(x => x.Type == LogItemType.Error).Select(x => x.Message).ToList();
+            var successLog = _log.Items.OrderBy(x => x.DateAdded).Where(x => x.Type == LogItemType.Success).Select(x => x.Message).ToList();
+            var errorLog = _log.Items.OrderBy(x => x.DateAdded).Where(x => x.Type == LogItemType.Error).Select(x => x.Message).ToList();
 
             NewLine();
             Write(string.Join(Environment.NewLine, successLog), 1);
             WriteLine($"INFO:{TAB}{requests:N0} requests completed in {elapsed:hh\\:mm\\:ss}");
             Write(string.Join(Environment.NewLine, errorLog), 1);
-
-            //Print Metrics
-            if (elapsed.Seconds > 0 && elapsed.Seconds < 60)
-            {
-                float multiplier = 60 / elapsed.Seconds;
-                WriteLine($"INFO:{TAB}{requests * multiplier:N0} requests completed per minute");
-                WriteLine($"INFO:{TAB}{requests * multiplier * 60:N0} requests completed in 1 hour");
-                WriteLine($"INFO:{TAB}{requests * multiplier * 60 * 2:N0} requests completed in 2 hours");
-                WriteLine($"INFO:{TAB}{requests * multiplier * 60 * 3:N0} requests completed in 3 hours");
-                WriteLine($"INFO:{TAB}{requests * multiplier * 60 * 8:N0} requests completed in 8 hours");
-                NewLine();
-            }
-
-            var ids = _log.Items.OrderBy(x => x.ID).Where(x => x.Type == LogItemType.Success).Select(x => x.ID).ToList();
-            Write(string.Join(',', ids));
+            elapsed.Add(TimeSpan.FromHours(1));
+            WriteLine($"INFO:{TAB}{requests:N0} requests completed in {elapsed:hh\\:mm\\:ss}");
+            WriteLine($"INFO:{TAB}{requests * 60:N0} requests completed in {elapsed.Add(TimeSpan.FromHours(1)):hh\\:mm\\:ss}");
+            WriteLine($"INFO:{TAB}{requests * 60 * 2:N0} requests completed in {elapsed.Add(TimeSpan.FromHours(2)):hh\\:mm\\:ss}");
+            WriteLine($"INFO:{TAB}{requests * 60 * 4:N0} requests completed in {elapsed.Add(TimeSpan.FromHours(4)):hh\\:mm\\:ss}");
+            WriteLine($"INFO:{TAB}{requests * 60 * 8:N0} requests completed in {elapsed.Add(TimeSpan.FromHours(8)):hh\\:mm\\:ss}");
+            NewLine();
 
         }
 

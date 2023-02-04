@@ -9,21 +9,21 @@ namespace USPSAddressValidator.Models
 
         public Logger() { }
 
-        public bool Message(string message, int id)
+        public bool Message(string message)
         {
-            Items.Add(new LogItem(message, id, LogItemType.Message));
+            Items.Add(new LogItem(message, LogItemType.Message));
             return true;
         }
 
-        public bool Success(string message, int id)
+        public bool Success(string message)
         {
-            Items.Add(new LogItem(message, id, LogItemType.Success));
+            Items.Add(new LogItem(message, LogItemType.Success));
             return true;
         }
 
-        public bool Error(string message, int id)
+        public bool Error(string message)
         {
-            Items.Add(new LogItem(message, id, LogItemType.Error));
+            Items.Add(new LogItem(message, LogItemType.Error));
             return true;
         }
 
@@ -44,14 +44,13 @@ namespace USPSAddressValidator.Models
     public class LogItem
     {
         public string Message { get; set; }
-        public int ID { get; set; } 
+        public DateTime DateAdded { get; set; }
         public LogItemType Type { get; set; }
-        public LogItem(string message, int id, LogItemType type = LogItemType.Message)
+        public LogItem(string message, LogItemType type = LogItemType.Message)
         {
             Message = message;
-            ID = id;
-         
             Type = type;
+            DateAdded = DateTime.Now;
         }
     }
 }
