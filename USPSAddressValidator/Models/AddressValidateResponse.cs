@@ -5,7 +5,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Xml.Serialization;
 
-namespace USPSAddressValidator.Models
+namespace USPSAddressValidator.Response
 {
     // using System.Xml.Serialization;
     // XmlSerializer serializer = new XmlSerializer(typeof(AddressValidateResponse));
@@ -17,7 +17,6 @@ namespace USPSAddressValidator.Models
     [XmlRoot(ElementName = "Address")]
     public class Address
     {
-
         [XmlElement(ElementName = "Address1")]
         public string? Address1 { get; set; }
 
@@ -34,13 +33,13 @@ namespace USPSAddressValidator.Models
         public string? State { get; set; }
 
         [XmlElement(ElementName = "Zip5")]
-        public int Zip5 { get; set; }
+        public string? Zip5 { get; set; }
 
         [XmlElement(ElementName = "Zip4")]
-        public int Zip4 { get; set; }
+        public string? Zip4 { get; set; }
 
         [XmlElement(ElementName = "DeliveryPoint")]
-        public int DeliveryPoint { get; set; }
+        public string? DeliveryPoint { get; set; }
 
         [XmlElement(ElementName = "CarrierRoute")]
         public string? CarrierRoute { get; set; }
@@ -67,7 +66,7 @@ namespace USPSAddressValidator.Models
         public string? Vacant { get; set; }
 
         [XmlAttribute(AttributeName = "ID")]
-        public int ID { get; set; }
+        public string? ID { get; set; }
 
         [XmlText]
         public string? Text { get; set; }
@@ -76,9 +75,8 @@ namespace USPSAddressValidator.Models
     [XmlRoot(ElementName = "AddressValidateResponse")]
     public class AddressValidateResponse
     {
-
         [XmlElement(ElementName = "Address")]
-        public Address? Address { get; set; }
+        public Address? Address { get; set; } = new Address();
     }
 
 

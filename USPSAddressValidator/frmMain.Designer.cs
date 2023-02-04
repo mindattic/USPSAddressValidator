@@ -67,7 +67,8 @@
             this.txtFile.Name = "txtFile";
             this.txtFile.Size = new System.Drawing.Size(631, 23);
             this.txtFile.TabIndex = 1;
-            this.txtFile.Text = "C:\\Users\\ryand\\OneDrive\\Desktop\\USPSAddressValidator\\USPSAddressValidator\\test1.csv";
+            this.txtFile.Text = "C:\\Users\\ryand\\OneDrive\\Desktop\\USPSAddressValidator\\USPSAddressValidator\\test1.c" +
+    "sv";
             // 
             // btnOpen
             // 
@@ -175,7 +176,7 @@
             this.txtBaseURL.Name = "txtBaseURL";
             this.txtBaseURL.Size = new System.Drawing.Size(631, 23);
             this.txtBaseURL.TabIndex = 23;
-            this.txtBaseURL.Text = "https://api.artic.edu/api/v1/artworks/";
+            this.txtBaseURL.Text = "https://secure.shippingapis.com/ShippingAPI.dll?API=Verify&XML=";
             // 
             // label3
             // 

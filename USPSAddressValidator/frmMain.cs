@@ -13,6 +13,12 @@ using System.Threading.Tasks;
 using System.Linq;
 using System.Runtime.InteropServices;
 using USPSAddressValidator.Extensions;
+using USPSAddressValidator.Response;
+using USPSAddressValidator.Request;
+using System.Xml.Serialization;
+using System.Text;
+using Microsoft.VisualBasic;
+using System.Xml;
 
 namespace USPSAddressValidator
 {
@@ -49,7 +55,7 @@ namespace USPSAddressValidator
         TimeSpan elapsed;
         Stopwatch watch = new Stopwatch();
         const string TAB = "     ";
-        List<int> IDList = new List<int>();
+        List<AddressValidateRequest> addressRequestList = new List<AddressValidateRequest>();
 
         #region Windows Form Events
 
@@ -109,15 +115,19 @@ namespace USPSAddressValidator
 
         private void ParseDataTable()
         {
-            IDList = new List<int>();
+            addressRequestList = new List<AddressValidateRequest>();
+
+            AddressValidateRequest rq;
             foreach (DataRow row in table.Rows)
             {
-                foreach (var cell in row.ItemArray)
-                {
-                    int id = int.TryParse(cell?.ToString(), out id) ? id : 0;
-                    if (id > 0)
-                        IDList.Add(id);
-                }
+                rq = new AddressValidateRequest();
+                rq.Address.Address1 = (string?)row.ItemArray[0] ?? null;
+                rq.Address.Address2 = (string?)row.ItemArray[1] ?? null;
+                rq.Address.City = (string?)row.ItemArray[2] ?? null;
+                rq.Address.State = (string?)row.ItemArray[3] ?? null;
+                rq.Address.Zip5 = (string?)row.ItemArray[4] ?? null;
+                rq.Address.Zip4 = (string?)row.ItemArray[5] ?? null;
+                addressRequestList.Add(rq);
             }
         }
 
@@ -148,19 +158,51 @@ namespace USPSAddressValidator
             watch.Start();
 
             var tasks = new List<Task>();
-         
+
             var throttler = new SemaphoreSlim(threadCount);
 
             WriteLine($"{Environment.NewLine}{TimeStamp}{TAB}Starting...");
 
-            foreach (var id in IDList)
+
+            var encoding = Encoding.GetEncoding("ISO-8859-1");
+            XmlWriterSettings xmlWriterSettings = new XmlWriterSettings
+            {
+                Indent = true,
+                OmitXmlDeclaration = false,
+                Encoding = encoding
+            };
+
+            XmlSerializer xmlSerializer = new XmlSerializer(typeof(AddressValidateRequest));
+
+            XmlSerializer xmlDeserializer = new XmlSerializer(typeof(AddressValidateResponse));
+
+            foreach (var rq in addressRequestList)
             {
                 await throttler.WaitAsync();
                 tasks.Add(Task.Run(async () =>
                 {
                     try
                     {
-                        var response = await GetAsync(id);
+                        string encodedXML;
+                        using (var stream = new MemoryStream())
+                        {
+                            using (var xmlWriter = XmlWriter.Create(stream, xmlWriterSettings))
+                            {
+                                //xmlSerializer.Serialize(xmlWriter, obj, ns);
+                                xmlSerializer.Serialize(xmlWriter, rq);
+                            }
+                            encodedXML = encoding.GetString(stream.ToArray());
+                        }
+
+
+
+                        // using (StringReader reader = new StringReader(xml))
+                        // {
+                        //    var test = (AddressValidateRequest)serializer.Deserialize(reader);
+                        // }
+
+                       
+                        var response = await GetAsync(encodedXML);
                         if (response == null || !response.IsSuccessStatusCode || response.Content == null)
                         {
                             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
@@ -168,16 +210,19 @@ namespace USPSAddressValidator
                             else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest)
                                 _stats.BadRequest();
 
-                            _log.Error($"Request failed: ID: {id}{TAB}{response.StatusCode.ToString()}", id);
+                            //_log.Error($"Request failed: ID: {id}{TAB}{response.StatusCode.ToString()}", id);
                             return;
                         }
 
                         var content = response.Content.ReadAsStringAsync().Result;
                         if (string.IsNullOrWhiteSpace(content)) return;
-                        var rs = JsonConvert.DeserializeObject<ArcticResponse>(content);
-                        if (rs == null || rs.data == null || string.IsNullOrWhiteSpace(rs.data.title)) return;
 
-                        _log.Success($"ID: {id}{TAB}Title: {rs.data.title}", id);
+                        AddressValidateResponse rs;
+                        using (StringReader reader = new StringReader(content))
+                            rs = (AddressValidateResponse)xmlDeserializer.Deserialize(reader);
+                        if (rs == null) return;
+
+                        _log.Success($"{TAB}Address: {rs.Address}", -1);
                         _stats.Success();
 
                         if (pingRate > 0)
@@ -214,9 +259,9 @@ namespace USPSAddressValidator
             PrintResults();
         }
 
-        private async Task<HttpResponseMessage> GetAsync(int id)
+        private async Task<HttpResponseMessage> GetAsync(string encodedXML)
         {
-            return await httpClient.GetAsync($"{baseURL}{id}");
+            return await httpClient.GetAsync($"{baseURL}{encodedXML}");
         }
 
         private void PrintResults()
@@ -228,7 +273,7 @@ namespace USPSAddressValidator
             Write(string.Join(Environment.NewLine, successLog), 1);
             WriteLine($"INFO:{TAB}{requests:N0} requests completed in {elapsed:hh\\:mm\\:ss}");
             Write(string.Join(Environment.NewLine, errorLog), 1);
-       
+
             //Print Metrics
             if (elapsed.Seconds > 0 && elapsed.Seconds < 60)
             {
@@ -272,6 +317,7 @@ namespace USPSAddressValidator
         {
             return int.TryParse(s, out _);
         }
+
 
 
 
