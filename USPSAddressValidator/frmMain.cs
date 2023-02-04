@@ -1,64 +1,58 @@
-using USPSAddressValidator.Models;
-using Microsoft.Extensions.DependencyInjection;
-using Newtonsoft.Json;
-using System.Collections.Concurrent;
 using System.Data;
 using System.Diagnostics;
-using System.Net.Http;
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Linq;
 using System.Runtime.InteropServices;
-using USPSAddressValidator.Extensions;
-using USPSAddressValidator.Response;
-using USPSAddressValidator.Request;
-using System.Xml.Serialization;
 using System.Text;
-using Microsoft.VisualBasic;
-using System.Xml;
 using System.Web;
-using Microsoft.VisualBasic.ApplicationServices;
+using System.Xml;
+using System.Xml.Serialization;
 using USPSAddressValidator.Helpers;
+using USPSAddressValidator.Models;
+using USPSAddressValidator.Request;
+using USPSAddressValidator.Response;
+using USPSAddressValidator.Utilities;
 
 namespace USPSAddressValidator
 {
     public partial class frmMain : Form
     {
-        // IHttpClientFactory clientFactory;
-        private static HttpClient httpClient = new HttpClient();
+        //Constants
+        const string TAB = "     ";
+        const string USER_ID = "213CVSHE8041";
+        static readonly Encoding ISO88591 = Encoding.GetEncoding("ISO-8859-1");
 
+        //API 
+        HttpClient httpClient = new HttpClient();
+        Stopwatch watch = new Stopwatch();
+        List<Task> tasks;
+        SemaphoreSlim throttler;
 
-        public frmMain()
+        //XML
+        XmlWriterSettings xmlWriterSettings = new XmlWriterSettings
         {
-            //var serviceProvider = new ServiceCollection().AddHttpClient().BuildServiceProvider();
-            //clientFactory = serviceProvider.GetService<IHttpClientFactory>();
+            Indent = true,
+            OmitXmlDeclaration = false,
+            Encoding = ISO88591
+        };
+        XmlSerializer xmlConvert = new XmlSerializer(typeof(AddressValidateResponse));
 
+        //Properties
+        string TimeStamp => $"{TimeSpan.FromMilliseconds(watch.ElapsedMilliseconds):hh\\:mm\\:ss}";
 
-            InitializeComponent();
-        }
+        //Utilities
+        readonly Logger log = new Logger();
+        readonly EventUtility stats = new EventUtility();
+        readonly PrintUtility print = new PrintUtility();
+        readonly FileUtility file = new FileUtility("C:\\Users\\ryand\\OneDrive\\Desktop\\USPSAddressValidator\\USPSAddressValidator\\results.csv");
 
-        private string TimeStamp => $"{TimeSpan.FromMilliseconds(watch.ElapsedMilliseconds):hh\\:mm\\:ss}";
-
-        Logger _log = new Logger();
-        Statistics _stats = new Statistics();
-
-        //FileWriter fileWriter = new FileWriter("C:\\Users\\ryand\\OneDrive\\Desktop\\USPSAddressValidator\\USPSAddressValidator\\results.csv");
-
-        DataTable table = new DataTable();
+        //Variables
+        DataTable table;
         string baseURL = string.Empty;
-        int tableSize = 0;
         int threadCount = 0;
-        int pingRate = 0;
+        int refreshRate = 0;
         int requests = 0;
         int taskDelay = 0;
-
-        TimeSpan elapsed;
-        Stopwatch watch = new Stopwatch();
-        const string TAB = "     ";
-        List<AddressValidateRequest> addressRequestList = new List<AddressValidateRequest>();
+        List<AddressValidateRequest> requestList;
+        StringBuilder results;
 
         #region Windows Form Events
 
@@ -66,10 +60,15 @@ namespace USPSAddressValidator
         [return: MarshalAs(UnmanagedType.Bool)]
         static extern bool AllocConsole();
 
+        public frmMain()
+        {
+            InitializeComponent();
+        }
+
         private void frmMain_Load(object sender, EventArgs e)
         {
             AllocConsole();
-            ConsoleHelper.MoveWindowToCenter();
+            ConsoleUtility.MoveWindowToCenter();
             openFileDialog.FileName = txtFile.Text;
             OpenFile();
         }
@@ -92,24 +91,25 @@ namespace USPSAddressValidator
 
         #endregion
 
+        /// <summary>
+        /// Method which is used to open a CSV file and load it into the DataTable
+        /// </summary>
+        /// <exception cref="Exception"></exception>
         private void OpenFile()
         {
             if (string.IsNullOrWhiteSpace(openFileDialog.FileName)) return;
 
             txtFile.Text = openFileDialog.FileName;
-            var csv = new ReadCSV(openFileDialog.FileName, false);
+            var csv = new CSVUtility(openFileDialog.FileName, false);
             table = csv.Table;
 
             try
             {
                 //TODO: System.Exception: 'Sum of the columns' FillWeight values cannot exceed 65535.'
-
-
                 if (chkPreviewCSV.Checked)
                     dataGridView.DataSource = table;
 
-                tableSize = table.Rows.Count * table.Columns.Count;
-                lblTableSize.Text = tableSize.ToString("N0");
+                lblRowSize.Text = $"Rows: {table.Rows.Count.ToString("N0")}";
             }
             catch (Exception ex)
             {
@@ -117,24 +117,9 @@ namespace USPSAddressValidator
             }
         }
 
-        private void ParseDataTable()
-        {
-            addressRequestList = new List<AddressValidateRequest>();
-
-            AddressValidateRequest rq;
-            foreach (DataRow row in table.Rows)
-            {
-                rq = new AddressValidateRequest();
-                rq.Address.Address1 = (string?)row.ItemArray[0] ?? "";
-                rq.Address.Address2 = (string?)row.ItemArray[1] ?? "";
-                rq.Address.City = (string?)row.ItemArray[2] ?? "";
-                rq.Address.State = (string?)row.ItemArray[3] ?? "";
-                rq.Address.Zip5 = (string?)row.ItemArray[4] ?? "";
-                rq.Address.Zip4 = (string?)row.ItemArray[5] ?? "";
-                addressRequestList.Add(rq);
-            }
-        }
-
+        /// <summary>
+        /// Method which is used to start API requests
+        /// </summary>
         private void Generate()
         {
             if (table == null)
@@ -143,109 +128,97 @@ namespace USPSAddressValidator
                 return;
             }
 
+            GenerateRequests();
+            Setup();
+            Process();
+        }
+
+        /// <summary>
+        /// Method which is used to generate a list of requests to be made
+        /// </summary>
+        private void GenerateRequests()
+        {
+            const int ADDRESS1 = 0;
+            const int ADDRESS2 = 1;
+            const int CITY = 2;
+            const int STATE = 3;
+            const int ZIP5 = 4;
+            const int ZIP4 = 5;
+
+            requestList = new List<AddressValidateRequest>();
+
+            foreach (DataRow row in table.Rows)
+            {
+                var rq = new AddressValidateRequest();
+                rq.Address.Address1 = (string)row.ItemArray[ADDRESS1] ?? "";
+                rq.Address.Address2 = (string)row.ItemArray[ADDRESS2] ?? "";
+                rq.Address.City = (string)row.ItemArray[CITY] ?? "";
+                rq.Address.State = (string)row.ItemArray[STATE] ?? "";
+                rq.Address.Zip5 = (string)row.ItemArray[ZIP5] ?? "";
+                rq.Address.Zip4 = (string)row.ItemArray[ZIP4] ?? "";
+                requestList.Add(rq);
+            }
+        }
+
+        /// <summary>
+        /// Method which is used to configure variables before making API requests
+        /// </summary>
+        private void Setup()
+        {
             //Assign options based on form elements
             baseURL = txtBaseURL.Text;
-            pingRate = int.TryParse(txtPingRate.Text, out pingRate) ? pingRate : 200;
+            refreshRate = int.TryParse(txtRefreshRate.Text, out refreshRate) ? refreshRate : 200;
             threadCount = int.TryParse(txtThreadCount.Text, out threadCount) ? threadCount : 3;
             taskDelay = int.TryParse(txtTaskDelay.Text, out taskDelay) ? taskDelay : 1;
 
-            ParseDataTable();
-            ProcessAsync();
-        }
-
-        public async void ProcessAsync()
-        {
-            //Initialize
-            _log.Clear();
-            _stats.Clear();
-            watch.Reset();
-            watch.Start();
-
-            var tasks = new List<Task>();
-
-            var throttler = new SemaphoreSlim(threadCount);
-
-            WriteLine($"{Environment.NewLine}{TimeStamp}{TAB}Starting...");
-
-            var encoding = Encoding.GetEncoding("ISO-8859-1");
-            XmlWriterSettings xmlWriterSettings = new XmlWriterSettings
+            tasks = new List<Task>();
+            throttler = new SemaphoreSlim(threadCount);
+            results = new StringBuilder();
+            xmlWriterSettings = new XmlWriterSettings
             {
                 Indent = true,
                 OmitXmlDeclaration = false,
-                Encoding = encoding
+                Encoding = ISO88591
             };
 
-            XmlSerializer xmlSerializer = new XmlSerializer(typeof(AddressValidateRequest));
+            //Initialize
+            log.Clear();
+            stats.Clear();
+            watch.Reset();
+            watch.Start();
+           
+        }
 
-            XmlSerializer xmlDeserializer = new XmlSerializer(typeof(AddressValidateResponse));
-            var userID = "213CVSHE8041";
+        public async void Process()
+        {
+            print.Line();
+            print.Line($"{TimeStamp}{TAB}Starting...");
+            print.Line();
 
-            foreach (var rq in addressRequestList)
+            foreach (var rq in requestList)
             {
                 await throttler.WaitAsync();
+
                 tasks.Add(Task.Run(async () =>
                 {
                     try
                     {
-                        var xml = "";
+                        var encodedXML = ComposeXML(rq);            //Convert request into ISO-8859-1 encoded XML
+                        var response = await GET(encodedXML);       //Sent GET request to API
+                        if (!IsValidResponse(response)) return;     //Validate response
+                        var rs = ParseResponse(response);           //Convert response into <AddressValidateResponse> model
 
-                        //Generate XML
-                        xml += $@"<AddressValidateRequest USERID=""{userID}"">";
-                        xml += $@"<Revision>1</Revision>";
-                        xml += $@"<Address ID=""0"">";
-                        xml += $@"<Address1>{rq.Address.Address1}</Address1>";
-                        xml += $@"<Address2>{rq.Address.Address2}</Address2>";
-                        xml += $@"<City>{rq.Address.City}</City>";
-                        xml += $@"<State>{rq.Address.State}</State>";
-                        xml += $@"<Zip5>{rq.Address.Zip5}</Zip5>";
-                        xml += $@"<Zip4>{rq.Address.Zip4}</Zip4>";
-                        xml += $@"</Address>";
-                        xml += $@"</AddressValidateRequest>";
+                        //Add result to collection
+                        var result = $"{rs.Address.Address1},{rs.Address.Address2},{rs.Address.City},{rs.Address.State},{rs.Address.Zip5},{rs.Address.Zip4}";
+                        results.AppendLine(result);
 
-                        var encoding = Encoding.GetEncoding("ISO-8859-1");
-                        string encodedXML = HttpUtility.UrlEncode(xml, encoding);
-
-                        var response = await GetAsync(encodedXML);
-                        if (response == null || !response.IsSuccessStatusCode || response.Content == null)
-                        {
-                            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-                                _stats.NotFound();
-                            else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest)
-                                _stats.BadRequest();
-
-                            //_log.Error($"Request failed: ID: {id}{TAB}{response.StatusCode.ToString()}", id);
-                            return;
-                        }
-
-                        var content = response.Content.ReadAsStringAsync().Result;
-                        if (string.IsNullOrWhiteSpace(content)) return;
-
-                        AddressValidateResponse rs;
-                        using (StringReader reader = new StringReader(content))
-                            rs = (AddressValidateResponse)xmlDeserializer.Deserialize(reader);
-                        if (rs == null) return;
-
-                        _log.Success($"{TimeStamp}{TAB}{rq.Address.Address1} {rq.Address.Address2} {rq.Address.City}, {rq.Address.State} {rq.Address.Zip5} {rq.Address.Zip4}");
-                        _stats.Success();
-
-                        if (pingRate > 0)
-                        {
-                            Interlocked.Increment(ref requests);
-                            if (requests % pingRate == 0)
-                            {
-                                elapsed = TimeSpan.FromMilliseconds(watch.ElapsedMilliseconds);
-                                WriteLine($"{TimeStamp}{TAB}{requests} requests completed in {elapsed:hh\\:mm\\:ss}");
-                            }
-
-                        }
-
-                        // let's wait here for X to honor the API's rate limit                         
+                        RefreshUI();
                         await Task.Delay(taskDelay);
                     }
                     catch (Exception ex)
                     {
-                        _log.Error(ex.Message);
-                        _stats.Exception();
+                        log.Error(ex.Message);
+                        stats.Exception();
                     }
                     finally
                     {
@@ -255,70 +228,99 @@ namespace USPSAddressValidator
                 }));
             }
 
-            // await for all the tasks to complete
+            //Wait for all the tasks to complete
             await Task.WhenAll(tasks.ToArray());
 
-            elapsed = TimeSpan.FromMilliseconds(watch.ElapsedMilliseconds);
-            WriteLine($"{Environment.NewLine}{TimeStamp}{TAB}Done.");
-
-            //Finalize
             watch.Stop();
+
+            SaveResults();
             PrintResults();
         }
 
-        private async Task<HttpResponseMessage> GetAsync(string encodedXML)
+        private string ComposeXML(AddressValidateRequest rq)
+        {
+            string xml
+                = $@"<AddressValidateRequest USERID=""{USER_ID}"">"
+                + $@"<Revision>1</Revision>"
+                + $@"<Address ID=""0"">"
+                + $@"<Address1>{rq.Address.Address1}</Address1>"
+                + $@"<Address2>{rq.Address.Address2}</Address2>"
+                + $@"<City>{rq.Address.City}</City>"
+                + $@"<State>{rq.Address.State}</State>"
+                + $@"<Zip5>{rq.Address.Zip5}</Zip5>"
+                + $@"<Zip4>{rq.Address.Zip4}</Zip4>"
+                + $@"</Address>"
+                + $@"</AddressValidateRequest>";
+
+            return HttpUtility.UrlEncode(xml, ISO88591);
+        }
+
+        private async Task<HttpResponseMessage> GET(string encodedXML)
         {
             return await httpClient.GetAsync($"{baseURL}{encodedXML}");
         }
 
+        private bool IsValidResponse(HttpResponseMessage response)
+        {
+            if (response == null || !response.IsSuccessStatusCode || response.Content == null)
+            {
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    stats.NotFound();
+                else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest)
+                    stats.BadRequest();
+
+                return false;
+            }
+
+            return true;
+        }
+
+        private AddressValidateResponse ParseResponse(HttpResponseMessage response)
+        {
+            var content = response.Content.ReadAsStringAsync().Result;
+            if (string.IsNullOrWhiteSpace(content)) return null;
+
+            AddressValidateResponse rs;
+            using (StringReader reader = new StringReader(content))
+                rs = (AddressValidateResponse)xmlConvert.Deserialize(reader);
+
+            return rs;
+        }
+
+        private void RefreshUI()
+        {
+            if (refreshRate < 1) return;
+
+            Interlocked.Increment(ref requests);
+            if (requests % refreshRate == 0)
+            {
+                var elapsed = TimeSpan.FromMilliseconds(watch.ElapsedMilliseconds);
+                print.Line($"{TimeStamp}{TAB}{requests} requests completed in {elapsed:hh\\:mm\\:ss}");
+            }
+        }
+
+        private void SaveResults(bool openFile = true)
+        {
+            file.Save(results.ToString());
+
+            if (openFile)
+                file.Open();
+        }
+
         private void PrintResults()
         {
-            var successLog = _log.Items.OrderBy(x => x.DateAdded).Where(x => x.Type == LogItemType.Success).Select(x => x.Message).ToList();
-            var errorLog = _log.Items.OrderBy(x => x.DateAdded).Where(x => x.Type == LogItemType.Error).Select(x => x.Message).ToList();
+            var elapsed = TimeSpan.FromMilliseconds(watch.ElapsedMilliseconds);
+            //var successLog = log.Items.OrderBy(x => x.DateAdded).Where(x => x.Type == LogItemType.Success).Select(x => x.Message).ToList();
+            //var errorLog = log.Items.OrderBy(x => x.DateAdded).Where(x => x.Type == LogItemType.Error).Select(x => x.Message).ToList();
 
-            NewLine();
-            Write(string.Join(Environment.NewLine, successLog), 1);
-            WriteLine($"INFO:{TAB}{requests:N0} requests completed in {elapsed:hh\\:mm\\:ss}");
-            Write(string.Join(Environment.NewLine, errorLog), 1);
-            elapsed.Add(TimeSpan.FromHours(1));
-            WriteLine($"INFO:{TAB}{requests:N0} requests completed in {elapsed:hh\\:mm\\:ss}");
-            WriteLine($"INFO:{TAB}{requests * 60:N0} requests completed in {elapsed.Add(TimeSpan.FromHours(1)):hh\\:mm\\:ss}");
-            WriteLine($"INFO:{TAB}{requests * 60 * 2:N0} requests completed in {elapsed.Add(TimeSpan.FromHours(2)):hh\\:mm\\:ss}");
-            WriteLine($"INFO:{TAB}{requests * 60 * 4:N0} requests completed in {elapsed.Add(TimeSpan.FromHours(4)):hh\\:mm\\:ss}");
-            WriteLine($"INFO:{TAB}{requests * 60 * 8:N0} requests completed in {elapsed.Add(TimeSpan.FromHours(8)):hh\\:mm\\:ss}");
-            NewLine();
+            print.Line();
+            print.Line($"{TimeStamp}{TAB}Done.");
+            print.Line();
+            //print.Text(string.Join(Environment.NewLine, successLog));
+            //print.Line();
+            //print.Text(string.Join(Environment.NewLine, errorLog));
 
+            print.Line($"{TimeStamp}{TAB}{requests:N0} requests completed in {elapsed:hh\\:mm\\:ss}");
         }
-
-        private void Write(string s = "", int newLines = 0)
-        {
-            Console.Out.WriteAsync(s);
-            Console.Out.WriteAsync($"{Environment.NewLine.Repeat(newLines)}");
-        }
-
-        private void WriteLine(string s = "")
-        {
-            Write(s, 1);
-        }
-
-
-        private void NewLine(int newLines = 1)
-        {
-            Console.Out.WriteAsync($"{Environment.NewLine.Repeat(newLines)}");
-        }
-
-        private string PluralSuffix(int count)
-        {
-            return count == 1 ? "" : "s";
-        }
-
-        private bool IsNumeric(string s)
-        {
-            return int.TryParse(s, out _);
-        }
-
-
-
-
     }
 }
